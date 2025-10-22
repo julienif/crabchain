@@ -1,0 +1,11 @@
+[package]
+name = "crabchain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ed25519-dalek = {version = "2.2.0", features = ["serde", "rand_core"]}
+lazy_static = "1.5.0"
+rand = "0.8"
+serde = {version = "1.0.228", features = ["derive"]}
+tokio = { version = "1", features = ["full"] }
