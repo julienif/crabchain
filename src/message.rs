@@ -1,3 +1,4 @@
+use std::fmt::write;
 use std::net::SocketAddr;
 use std::time::Duration;
 use crate::node::*;
@@ -14,6 +15,7 @@ use serde_json;
 
 #[cfg(not(debug_assertions))]
 use bincode;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,7 +29,7 @@ pub struct Transaction {
 pub enum Message {
     Ping,
     Pong,
-    Connection(Box<Node>),
+    Hello(Box<Node>),
     GossipTx(Box<Transaction>),
     GossipBlock(Box<BlockHeader>),
     NewBlock(Box<Block>),
@@ -88,19 +90,28 @@ pub async fn read_socket(socket: &mut TcpStream) -> io::Result<Vec<u8>> {
 }
 
 pub async fn expect_answer(socket: &mut TcpStream, state: SharedState, sk: SigningKey) -> io::Result<()> {
-    if let Err(e) = timeout(crate::TIMEOUT, handle_connection(socket, state, sk)).await {
-        return Err(io::Error::other(e));
+    match timeout(crate::TIMEOUT, handle_connection(socket, state, sk)).await {
+        Ok(inner_result) => inner_result, // error propagated from handle_connection
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout expired")),
     }
-    Ok(())
 }
 
 pub async fn ping(addr: SocketAddr, state: SharedState, sk: SigningKey) -> io::Result<()> {
     let mut socket = send_message(addr, Message::Ping).await?;
-    expect_answer(&mut socket, state, sk).await
+    let state = state.clone();
+    if let Err(e) = expect_answer(&mut socket, state.clone(), sk).await {
+        if e.kind() != io::ErrorKind::TimedOut {
+            return Err(e);
+        }
+        let mut peers = state.connected_peers.write()
+            .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+        peers.retain(|p, _| p.addr != addr);
+    }
+    Ok(())
 }
 
 pub async fn pong(socket: &mut TcpStream) -> io::Result<()> {
-    //tokio::time::sleep(Duration::from_secs(6)).await; TODO use this to handle timeout w/o crash
+    //tokio::time::sleep(Duration::from_secs(6)).await; // use this to handle timeout w/o crash
     send_message_socket(socket, Message::Pong).await
 }
 

@@ -31,10 +31,7 @@ async fn integration_ping_pong() -> std::io::Result<()> {
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let state = SharedState {
-        known_peers: Arc::new(RwLock::new(HashSet::new())),
-        connected_peers: Arc::new(RwLock::new(HashMap::new()))
-    };
+    let state = Arc::new(State::default());
 
     ping(addr_b, state, sk_a).await?;
     println!("Node A sent Ping to {}", addr_b);

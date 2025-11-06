@@ -6,34 +6,44 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-use crate::message::*;
+use crate::{message::*, KEEP_ALIVE};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub id: VerifyingKey,
     pub addr: SocketAddr
 }
 
-#[derive(Debug, Clone)]
-pub struct SharedState {
-    pub known_peers: Arc<RwLock<HashSet<Node>>>,
-    pub connected_peers: Arc<RwLock<HashMap<Node, u64>>>
+#[derive(Debug)]
+pub struct State {
+    pub known_peers: RwLock<HashSet<Node>>,
+    pub connected_peers: RwLock<HashMap<Node, u64>>
 }
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            known_peers: RwLock::new(HashSet::new()),
+            connected_peers: RwLock::new(HashMap::new())
+
+        }
+    }
+}
+
+pub type SharedState = Arc<State>;
 
 impl Node {
     pub async fn join_network(&self, listener: TcpListener, sk: SigningKey) -> io::Result<()> {
-        let state = SharedState {
-            known_peers: Arc::new(RwLock::new(HashSet::new())),
-            connected_peers: Arc::new(RwLock::new(HashMap::new()))
-        };
+        let state = Arc::new(State::default());
         let state_clone = state.clone();
+        let sk_clone = sk.clone();
 
         // p2p communication
         let _listener_task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await?;
                 let state = state_clone.clone();
-                let sk = sk.clone();
+                let sk = sk_clone.clone();
                 let _connection_task = tokio::spawn(async move {
                     handle_connection(&mut socket, state, sk).await
                 }).await?;
@@ -44,8 +54,7 @@ impl Node {
 
         // Keep Alive
         loop {
-            let state = state.clone();
-            keep_alive(state.clone()).await?;
+            keep_alive(state.clone(), sk.clone()).await?;
         }
         
         #[allow(unreachable_code)]
@@ -63,8 +72,17 @@ pub async fn handle_connection(socket: &mut TcpStream, state: SharedState, sk: S
     }
 }
 
-async fn keep_alive(state: SharedState) -> io::Result<()> {
-    //TODO
+pub async fn keep_alive(state: SharedState, sk: SigningKey) -> io::Result<()> {
+    tokio::time::sleep(KEEP_ALIVE).await;
+    let state = state.clone();
+    let peers: Vec<Node> = {
+        let peers = state.connected_peers.read()
+            .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+        peers.keys().cloned().collect()
+    };
+    for node in peers.iter() {
+        ping(node.addr, state.clone(), sk.clone()).await?;
+    }
     Ok(())
 }
 
@@ -79,7 +97,7 @@ async fn process(msg: Message, socket: &mut TcpStream, state: SharedState, sk: S
             println!("pong!");
             Ok(())
         },
-        Message::Connection(node) => Ok(()),
+        Message::Hello(node) => Ok(()),
         Message::GossipTx(tx) => Ok(()),
         Message::GossipBlock(block_header) => Ok(()),
         Message::NewBlock(block) => Ok(()),
