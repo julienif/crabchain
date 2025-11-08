@@ -1,13 +1,13 @@
+use blake3::Hash;
 use serde::{Deserialize, Serialize};
-use crate::Digest;
 use crate::message::Transaction;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub idx: u32,
     pub timestamp: u64,
-    pub hash: Digest,
-    pub previous_hash: Digest
+    pub hash: Hash,
+    pub previous_hash: Hash
 }
 
 #[derive(Debug, Serialize, Deserialize)]

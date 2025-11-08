@@ -13,17 +13,12 @@ async fn main() -> io::Result<()> {
     }
     
     let address: SocketAddr = args[1].parse().unwrap();
-    let sk = signing_key();
-    let pk = sk.verifying_key();
 
-    let node = Node {
-        id: pk,
-        addr: address
-    };
+    let node = Node::new(address);
 
     let listener = TcpListener::bind(address).await?;
     
-    node.join_network(listener, sk).await?;
+    node.join_network(listener).await?;
 
     Ok(())
 }
