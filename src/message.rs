@@ -5,7 +5,7 @@ use crate::utils::now;
 use crate::block::{Block, BlockHeader};
 use crate::blockchain::BlockRange;
 use blake3::Hash;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::Signature;
 use serde::{Serialize, Deserialize};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;      
@@ -130,9 +130,9 @@ pub async fn pong(socket: &mut TcpStream)
     send_message_socket(socket, Message::Pong).await
 }
 
-pub async fn hello(node: Node, peer: Peer)
+pub async fn hello(node: Node, addr: SocketAddr)
 -> io::Result<()> {
-    let mut socket = send_message(peer.addr, Message::Hello(Box::new(node.peer))).await?;
+    let mut socket = send_message(addr, Message::Hello(Box::new(node.peer))).await?;
     if let Err(e) = expect_answer(node, &mut socket).await
         && e.kind() != io::ErrorKind::TimedOut {
             return Err(e);
@@ -170,6 +170,9 @@ pub async fn challenge(node: Node, socket: &mut TcpStream, new_peer: Peer)
         let nonce = nonce();
         let node_clone = node.clone();
         node_clone.add_sent_nonce(nonce, new_peer.addr, NonceType::Sent).await?;
+        send_message_socket(socket, Message::Challenge(Box::new((nonce, node.peer)))).await
+    } else if !is_known_peer {
+        let nonce = Nonce::default();
         send_message_socket(socket, Message::Challenge(Box::new((nonce, node.peer)))).await
     } else {
         Ok(())

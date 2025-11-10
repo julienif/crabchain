@@ -1,5 +1,6 @@
-use std::clone;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -38,7 +39,6 @@ impl Default for State {
         State {
             known_peers: RwLock::new(HashSet::new()),
             connected_peers: RwLock::new(HashMap::new())
-
         }
     }
 }
@@ -50,7 +50,8 @@ pub struct Node {
     pub sk: SigningKey,
     pub peer: Peer,
     pub state: SharedState,
-    nonces: Arc<RwLock<HashSet<(Nonce, u64)>>>,
+    nonces: Arc<RwLock<HashSet<(Nonce, u64)>>>, //TODO add to set and remove old nonces ignore used
+                                                //nonces
     pub sent_nonces: Arc<RwLock<HashMap<SocketAddr, (Nonce, u64)>>>,
     pub recv_nonces: Arc<RwLock<HashMap<SocketAddr, (Nonce, u64)>>>,
 }
@@ -79,9 +80,15 @@ impl Node {
                 let (mut socket, _) = listener.accept().await?;
                 let _connection_task = tokio::spawn(async move {
                     self_node.handle_connection(&mut socket).await
-                }).await?;
+                });
             }
             Ok::<_, io::Error>(())
+        });
+
+        let self_node_clone = self.clone();
+        let _bootstrap_task = tokio::spawn(async move {
+            time::sleep(Duration::from_millis(100)).await;
+            let _bootstrap = self_node_clone.bootstrap().await;
         });
 
         let self_node_clone = self.clone();
@@ -97,7 +104,7 @@ impl Node {
         let _challenged_task = tokio::spawn(async move {
             loop {
                 let self_node = self_node_clone.clone();
-                let _challenged_task = self_node.challenged().await;
+                let _challenged = self_node.challenged().await;
             }
         });
 
@@ -117,6 +124,25 @@ impl Node {
         }
     }
     
+    pub async fn bootstrap(self) -> io::Result<()> {
+        println!("bootstraping");
+        let file = File::open("res/peers.txt")?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?;
+            println!("addr: {:?}", line);
+            let addr: SocketAddr = line.parse().unwrap();
+            if addr == self.peer.addr {
+                println!("skipping");
+                continue;
+            } else {
+                let _ = hello(self.clone(), addr).await;
+            }
+        }
+        Ok(())
+    }
+
     async fn keep_alive(self) -> io::Result<()> {
         tokio::time::sleep(KEEP_ALIVE).await;
         let state = self.state.clone();
@@ -126,7 +152,7 @@ impl Node {
             peers.keys().cloned().collect()
         };
         for peer in peers.iter() {
-            ping(self.clone(), peer.addr).await?;
+            let _ = ping(self.clone(), peer.addr).await;
         }
         Ok(())
     }
@@ -151,7 +177,7 @@ impl Node {
                 connected_peers.len()
             };
             if connected_peers_len < crate::MAX_PEERS {
-                accept(node_self_clone, *nonce, *target).await?;
+                let _ = accept(node_self_clone, *nonce, *target).await;
             }
         }
         Ok(())
@@ -178,7 +204,6 @@ impl Node {
                 let peer = nonce_peer_tuple.1;
                 println!("challenge: {:?}", peer.addr);
                 self.add_sent_nonce(nonce, peer.addr, NonceType::Received).await
-                //accept(self, nonce, peer).await
             },
             Message::Accept(connect_message) => {
                 println!("accept");
@@ -189,6 +214,7 @@ impl Node {
                 if verify_connect_msg(connect_message)
                     && since(ts) < TS_VALID 
                         && self.clone().match_nonce(peer, nonce, NonceType::Sent).await? {
+                    self.clone().add_connected_peer(peer).await?;
                     connect(self, peer, socket, nonce).await
                 } else {
                     Ok(()) // corrupted msg ignored
@@ -203,7 +229,7 @@ impl Node {
                 if verify_connect_msg(connect_message)
                     && since(ts) < TS_VALID 
                         && self.clone().match_nonce(peer, nonce, NonceType::Received).await? {
-                    self.add_peer(peer).await
+                    self.add_connected_peer(peer).await
                 } else {
                     Ok(()) // corrupted msg ignored
                 }
@@ -217,7 +243,7 @@ impl Node {
         }
     }
 
-    async fn add_peer(self, new_peer: Peer) -> io::Result<()> {
+    async fn add_connected_peer(self, new_peer: Peer) -> io::Result<()> {
         let state = self.state.clone();
         let mut peers = {
             state.connected_peers.write()
@@ -227,10 +253,19 @@ impl Node {
         Ok(())
     }
 
+    async fn add_known_peer(self, new_peer: Peer) -> io::Result<()> {
+        let state = self.state.clone();
+        let mut peers = {
+            state.known_peers.write()
+                .map_err(|_| io::Error::other("Connected peers poisoined"))?
+        };
+        peers.insert(new_peer);
+        Ok(())
+    }
     pub async fn seen_nonce(self, nonce: Nonce) -> io::Result<()> {
         let seen_nonces = self.nonces.clone();
         let mut seen_nonces = seen_nonces.write()
-            .map_err(|_| io::Error::other("Sent nonces poisoined"))?;
+            .map_err(|_| io::Error::other("Seen nonces poisoined"))?;
         seen_nonces.insert((nonce, now()));
         Ok(())
     }

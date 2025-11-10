@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub const TIMEOUT: Duration = Duration::from_secs(5);
-pub const KEEP_ALIVE: Duration = Duration::from_secs(30);
+pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
 pub const CHALLENGED: Duration = Duration::from_secs(5);
 pub const TS_VALID: u64 = 10; // timestamp ok if 10 secs
 

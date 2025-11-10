@@ -2,7 +2,6 @@ use tokio::net::TcpListener;
 use std::net::SocketAddr;
 use std::{env, io};
 use crabchain::node::*;
-use crabchain::crypto::signing_key;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -18,7 +17,12 @@ async fn main() -> io::Result<()> {
 
     let listener = TcpListener::bind(address).await?;
     
-    node.join_network(listener).await?;
+    let _net_task = tokio::spawn( async move {
+        node.join_network(listener).await
+    }).await?;
 
+    loop {}
+    
+    #[allow(unreachable_code, dead_code)]
     Ok(())
 }
