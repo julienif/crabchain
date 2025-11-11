@@ -1,4 +1,4 @@
-use ed25519_dalek::{ed25519::signature::SignerMut, SigningKey};
+use ed25519_dalek::{SigningKey, VerifyingKey, ed25519::signature::SignerMut};
 use rand::{rngs::OsRng, Rng};
 use crate::{message::ConnectMessage, node::Peer, utils::now, Nonce};
 
@@ -18,7 +18,7 @@ pub fn hash_sign_connect_msg(peer: Peer, nonce: Nonce, sk: &mut SigningKey) -> C
     let addr_string = peer.addr.to_string();
     let ts = now();
     let mut hasher = blake3::Hasher::new();
-    hasher.update(peer.id.as_bytes());
+    hasher.update(&peer.id);
     hasher.update(addr_string.as_bytes());
     hasher.update(&ts.to_be_bytes());
     hasher.update(&nonce.0);
@@ -34,7 +34,7 @@ pub fn verify_connect_msg(msg: ConnectMessage) -> bool {
     let nonce = msg.nonce;
     let hash = msg.hash;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(pk.as_bytes());
+    hasher.update(&pk);
     hasher.update(addr_string.as_bytes());
     hasher.update(&msg.timestamp.to_be_bytes());
     hasher.update(&nonce.0);
@@ -43,5 +43,6 @@ pub fn verify_connect_msg(msg: ConnectMessage) -> bool {
         return false;
     }
 
+    let pk = VerifyingKey::from_bytes(&pk).unwrap();
     pk.verify_strict(hash.as_bytes(), &msg.sig).is_ok()
 }

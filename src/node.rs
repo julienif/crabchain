@@ -3,26 +3,32 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::time::Duration;
+use blake3::Hash;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{io, time};
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{PUBLIC_KEY_LENGTH, SigningKey, VerifyingKey};
 
 use crate::crypto::{signing_key, verify_connect_msg};
 use crate::utils::{now, since};
-use crate::{message::*, Nonce, NonceType, CHALLENGED, KEEP_ALIVE, TS_VALID};
+use crate::{CHALLENGED, HELLO, KEEP_ALIVE, MAX_PEERS, Nonce, NonceType, TS_VALID, message::*};
+use crate::Encode;
+
+//TODO node seems to connect to himself => avoid that
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
-    pub id: VerifyingKey,
+    pub id: [u8; PUBLIC_KEY_LENGTH],
     pub addr: SocketAddr
 }
+
+impl Encode for Peer {}
 
 impl Peer {
     fn new(id: VerifyingKey, addr: SocketAddr) -> Self {
         Peer {
-            id: id,
+            id: id.to_bytes(),
             addr: addr
         }
     }
@@ -50,10 +56,10 @@ pub struct Node {
     pub sk: SigningKey,
     pub peer: Peer,
     pub state: SharedState,
-    nonces: Arc<RwLock<HashSet<(Nonce, u64)>>>, //TODO add to set and remove old nonces ignore used
-                                                //nonces
+    nonces: Arc<RwLock<HashMap<Nonce, u64>>>,
     pub sent_nonces: Arc<RwLock<HashMap<SocketAddr, (Nonce, u64)>>>,
     pub recv_nonces: Arc<RwLock<HashMap<SocketAddr, (Nonce, u64)>>>,
+    pub gossiped: Arc<RwLock<HashMap<Hash, u64>>>
 }
 
 impl Node {
@@ -63,9 +69,10 @@ impl Node {
             sk: sk.clone(),
             peer: Peer::new(sk.verifying_key(), addr),
             state: Arc::new(State::default()),
-            nonces: Arc::new(RwLock::new(HashSet::new())),
+            nonces: Arc::new(RwLock::new(HashMap::new())),
             sent_nonces: Arc::new(RwLock::new(HashMap::new())),
-            recv_nonces: Arc::new(RwLock::new(HashMap::new()))
+            recv_nonces: Arc::new(RwLock::new(HashMap::new())),
+            gossiped: Arc::new(RwLock::new(HashMap::new()))
         }
     }
 
@@ -108,8 +115,22 @@ impl Node {
             }
         });
 
-        //TODO Hello loop to known_peers if connected_peers_len < MAX and init known_peers from seed
-        
+        let self_node_clone = self.clone();
+        let _hello_task = tokio::spawn(async move {
+            loop {
+                let self_node = self_node_clone.clone();
+                let _hello = self_node.hello_known().await;
+            }
+        });
+
+        let self_node_clone = self.clone();
+        let _wash_task = tokio::spawn(async move {
+            loop {
+                let self_node = self_node_clone.clone();
+                let _wash = self_node.wash().await;
+            }
+        });
+
         Ok(())
     }
 
@@ -118,7 +139,7 @@ impl Node {
         let data = read_socket(socket).await?;
         time::sleep(Duration::from_secs(1)).await;
     
-        match deserialize(data) {
+        match Encode::deserialize(data) {
             Ok(msg) => self.process(msg, socket).await,
             Err(e) => Err(e)
         }
@@ -148,11 +169,16 @@ impl Node {
         let state = self.state.clone();
         let peers: Vec<Peer> = {
             let peers = state.connected_peers.read()
-                .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+                .expect("connected_peers poisoined (read)");
             peers.keys().cloned().collect()
         };
+
         for peer in peers.iter() {
-            let _ = ping(self.clone(), peer.addr).await;
+            let self_clone = self.clone();
+            let addr = peer.addr;
+            let _ping_task = tokio::spawn(async move {
+                let _ = ping(self_clone.clone(), addr).await;
+            });
         }
         Ok(())
     }
@@ -161,7 +187,7 @@ impl Node {
         tokio::time::sleep(CHALLENGED).await;
         let nonces_and_targets: Vec<(Nonce, SocketAddr)> = {
             let mut recv_nonces = self.recv_nonces.write()
-                .map_err(|_| io::Error::other("Sent nonces poisoined"))?;
+                .expect("recv_nonces poisoined (write)");
             recv_nonces.retain(|_, (_, ts)| since(*ts) < TS_VALID);
             recv_nonces.iter()
                 .map(|(addr, (nonce, _))| (*nonce, *addr))
@@ -173,12 +199,75 @@ impl Node {
                 let node_self = node_self_clone.clone();
                 let state = node_self.state.clone();
                 let connected_peers = state.connected_peers.read()
-                    .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+                    .expect("connected_peers poisoined (read)");
                 connected_peers.len()
             };
             if connected_peers_len < crate::MAX_PEERS {
                 let _ = accept(node_self_clone, *nonce, *target).await;
             }
+        }
+        Ok(())
+    }
+
+    async fn hello_known(self) -> io::Result<()> {
+        tokio::time::sleep(HELLO).await;
+        let node_self_clone = self.clone();
+        let connected_peers_len = {
+            let node_self = node_self_clone.clone();
+            let state = node_self.state.clone();
+            let connected_peers = state.connected_peers.read()
+                .expect("connected_peers poisoined (read)");
+            connected_peers.len()
+        };
+        if connected_peers_len >= MAX_PEERS { return Ok(()); }
+        let state = self.state.clone();
+        let peers: Vec<Peer> = {
+            let peers = state.known_peers.read()
+                .expect("known_peers poisoined (read)");
+            peers.iter().cloned().collect()
+        };
+
+        for peer in peers.iter() {
+            let node_self = node_self_clone.clone();
+            let state = node_self.state.clone();
+            let connected_peers = state.connected_peers.read()
+                .expect("connected_peers poisoined (read)");
+            if connected_peers.contains_key(peer) {
+                continue;
+            }
+            let self_clone = self.clone();
+            let addr = peer.addr;
+            let _ping_task = tokio::spawn(async move {
+                let _ = hello(self_clone.clone(), addr).await;
+            });
+        }
+        Ok(())
+    }
+
+    async fn wash(self) -> io::Result<()> {
+        tokio::time::sleep(10*KEEP_ALIVE).await;
+        {
+            let nonces = self.nonces.write()
+                .expect("nonces poisoined (write)");
+            nonces.clone().retain(|_, ts| since(*ts) < crate::TS_VALID);
+        }
+
+        {
+            let nonces = self.sent_nonces.write()
+                .expect("sent_nonces poisoined (write)");
+            nonces.clone().retain(|_, (_, ts)| since(*ts) < crate::TS_VALID);
+        }
+
+        {
+            let nonces = self.recv_nonces.write()
+                .expect("recv_nonces poisoined (write)");
+            nonces.clone().retain(|_, (_, ts)| since(*ts) < crate::TS_VALID);
+        }
+
+        {
+            let gossiped = self.gossiped.write()
+                .expect("gossiped poisoined (write)");
+            gossiped.clone().retain(|_, ts| since(*ts) < crate::TS_VALID);
         }
         Ok(())
     }
@@ -191,52 +280,87 @@ impl Node {
                 println!("ping!");
                 pong(socket).await
             },
+
             Message::Pong => {
                 println!("pong!");
                 Ok(())
             },
+
             Message::Hello(peer) => {
+                self.clone().add_known_peer(*peer.clone()).await?;
                 println!("hello! {:?}", peer.addr);
-                challenge(self, socket, *peer).await
+                let _ = challenge(self.clone(), socket, *peer).await;
+                gossip_peer(self, *peer.clone()).await
             },
+
             Message::Challenge(nonce_peer_tuple) => {
                 let nonce = nonce_peer_tuple.0;
                 let peer = nonce_peer_tuple.1;
+                self.clone().add_known_peer(peer).await?;
+                if nonce == Nonce::default() { return Ok(()); }
                 println!("challenge: {:?}", peer.addr);
-                self.add_sent_nonce(nonce, peer.addr, NonceType::Received).await
+
+                match self.clone().is_nonce_seen(nonce).await {
+                    Ok(false) => self.add_sent_nonce(nonce, peer.addr, NonceType::Received).await,
+                    _ => Ok(())
+                }
             },
+
             Message::Accept(connect_message) => {
                 println!("accept");
                 let connect_message = *connect_message;
                 let peer = connect_message.peer;
                 let ts = connect_message.timestamp;
                 let nonce = connect_message.nonce;
-                if verify_connect_msg(connect_message)
-                    && since(ts) < TS_VALID 
-                        && self.clone().match_nonce(peer, nonce, NonceType::Sent).await? {
-                    self.clone().add_connected_peer(peer).await?;
-                    connect(self, peer, socket, nonce).await
-                } else {
-                    Ok(()) // corrupted msg ignored
+
+                match self.clone().is_nonce_seen(nonce).await {
+                    Ok(false) => {
+                        if verify_connect_msg(connect_message)
+                            && since(ts) < TS_VALID 
+                                && self.clone().match_nonce(peer, nonce, NonceType::Sent).await? {
+                            self.clone().add_connected_peer(peer).await?;
+                            connect(self, peer, socket, nonce).await
+                        } else {
+                            Ok(()) // corrupted msg ignored
+                        }
+                    },
+                    _ => Ok(())
                 }
             },
+
             Message::Connect(connect_message) => {
                 println!("connect");
                 let connect_message = *connect_message;
                 let peer = connect_message.peer;
                 let ts = connect_message.timestamp;
                 let nonce = connect_message.nonce;
-                if verify_connect_msg(connect_message)
-                    && since(ts) < TS_VALID 
-                        && self.clone().match_nonce(peer, nonce, NonceType::Received).await? {
-                    self.add_connected_peer(peer).await
-                } else {
-                    Ok(()) // corrupted msg ignored
+
+                match self.clone().is_nonce_seen(nonce).await {
+                    Ok(false) => {
+                        if verify_connect_msg(connect_message)
+                            && since(ts) < TS_VALID 
+                                && self.clone().match_nonce(peer, nonce, NonceType::Received).await? {
+                            self.add_connected_peer(peer).await
+                        } else {
+                            Ok(()) // corrupted msg ignored
+                        }
+                    }
+                    _ => Ok(())
                 }
             },
-            Message::GossipTx(tx) => Ok(()),
-            Message::GossipBlock(block_header) => Ok(()),
-            Message::GossipPeer(peer) => Ok(()),
+
+            Message::Gossip(boxed_gossip) => {
+                println!("gossip");
+                match *boxed_gossip.clone() {
+                    Gossip::PeerGossip(peer_gossip) => {
+                        self.clone().add_gossip(peer_gossip.hash).await?;
+                        let peer: Peer = Encode::deserialize(peer_gossip.encoded_peer)?;
+                        //TODO avoid adding ourselves
+                        self.clone().add_known_peer(peer).await?;
+                    }
+                };
+                gossip(self, *boxed_gossip).await
+            },
             Message::NewBlock(block) => Ok(()),
             Message::GetBlock(block_digest) => Ok(()),
             Message::GetBlocks(range) => Ok(()),
@@ -247,7 +371,7 @@ impl Node {
         let state = self.state.clone();
         let mut peers = {
             state.connected_peers.write()
-                .map_err(|_| io::Error::other("Connected peers poisoined"))?
+                .expect("connected_peers poisoined (write)")
         };
         peers.insert(new_peer, now());
         Ok(())
@@ -257,17 +381,24 @@ impl Node {
         let state = self.state.clone();
         let mut peers = {
             state.known_peers.write()
-                .map_err(|_| io::Error::other("Connected peers poisoined"))?
+                .expect("known_peers poisoined (write)")
         };
         peers.insert(new_peer);
         Ok(())
     }
+
     pub async fn seen_nonce(self, nonce: Nonce) -> io::Result<()> {
-        let seen_nonces = self.nonces.clone();
-        let mut seen_nonces = seen_nonces.write()
-            .map_err(|_| io::Error::other("Seen nonces poisoined"))?;
-        seen_nonces.insert((nonce, now()));
+        let nonces = self.nonces.clone();
+        let mut nonces = nonces.write()
+            .expect("nonces poisoined (write)");
+        nonces.insert(nonce, now());
         Ok(())
+    }
+
+    pub async fn is_nonce_seen(self, nonce: Nonce) -> io::Result<bool> {
+        let nonces = self.nonces.read()
+            .expect("nonces poisoined (read)");
+        Ok(nonces.contains_key(&nonce))
     }
 
     pub async fn add_sent_nonce(self, nonce: Nonce, peer_addr: SocketAddr, nonce_type: NonceType) -> io::Result<()> {
@@ -278,7 +409,7 @@ impl Node {
             }
         };
         let mut sent_nonces = sent_nonces.write()
-            .map_err(|_| io::Error::other("Sent nonces poisoined"))?;
+            .expect("sent_nonces poisoined (write)");
         sent_nonces.insert(peer_addr, (nonce, now()));
         Ok(())
     }
@@ -290,10 +421,11 @@ impl Node {
                 NonceType::Received => self.recv_nonces.clone()
             }
         };
+        #[allow(unused_assignments)]
         let mut expected_nonce = Nonce::default();
         {
             let nonces = nonces.read()
-                .map_err(|_| io::Error::other("Sent nonces poisoined"))?;
+                .expect("sent_or_recv_nonces poisoined (read)");
             if !nonces.contains_key(&peer.addr) {
                 return Ok(false);       
             } else {      
@@ -306,12 +438,25 @@ impl Node {
 
         if expected_nonce == nonce && expected_nonce != Nonce::default() {
             let mut nonces = nonces.write()
-                .map_err(|_| io::Error::other("Sent nonces poisoined"))?;
+                .expect("sent_or_recv_nonces poisoined (write)");
             nonces.remove(&peer.addr);
             return Ok(true);
         }
 
         Ok(false)
+    }
+
+    pub async fn add_gossip(self, hash: Hash) -> io::Result<()> {
+        let mut gossiped = self.gossiped.write()
+            .expect("gossiped poisoined (write)");
+        gossiped.insert(hash, now());
+        Ok(())
+    }
+
+    pub async fn is_gossip_seen(self, hash: Hash) -> io::Result<bool> {
+        let gossiped = self.gossiped.read()
+            .expect("gossiped poisoined (read)");
+        Ok(gossiped.contains_key(&hash))
     }
 }
 

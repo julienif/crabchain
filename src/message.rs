@@ -1,37 +1,43 @@
 use std::net::SocketAddr;
 use crate::crypto::{hash_sign_connect_msg, nonce};
-use crate::{node::*, Nonce, NonceType};
+use crate::{Encode, Nonce, NonceType, node::*};
 use crate::utils::now;
 use crate::block::{Block, BlockHeader};
 use crate::blockchain::BlockRange;
 use blake3::Hash;
-use ed25519_dalek::Signature;
+use ed25519_dalek::{PUBLIC_KEY_LENGTH, Signature};
 use serde::{Serialize, Deserialize};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;      
 use tokio::time::timeout;
 
-#[cfg(debug_assertions)]
-use serde_json;
-
-#[cfg(not(debug_assertions))]
-use bincode;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Transaction {
-    pub sender_id: [u8; 32],
+    pub sender_id: [u8; PUBLIC_KEY_LENGTH],
     pub payload: Vec<u8>,
     pub timestamp: u64,
     pub hash: Hash
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ConnectMessage {
     pub peer: Peer,
     pub timestamp: u64,
     pub nonce: Nonce,
     pub hash: Hash,
     pub sig: Signature
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerGossip {
+    pub sender_id: [u8; PUBLIC_KEY_LENGTH],
+    pub encoded_peer: Vec<u8>,
+    pub hash: Hash
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Gossip {
+    PeerGossip(Box<PeerGossip>)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,18 +48,17 @@ pub enum Message {
     Challenge(Box<(Nonce, Peer)>),
     Accept(Box<ConnectMessage>),
     Connect(Box<ConnectMessage>),
-    GossipTx(Box<Transaction>),
-    GossipBlock(Box<BlockHeader>),
-    GossipPeer(Box<Peer>),
+    Gossip(Box<Gossip>),
     NewBlock(Box<Block>),
     GetBlock(Box<Hash>),
     GetBlocks(Box<BlockRange>),
 }
 
-#[cfg(debug_assertions)]
+impl Encode for Message {}
+
 pub async fn send_message(addr: SocketAddr, msg: Message) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(addr).await?;
-    let data = serialize(msg)?;
+    let data = Encode::serialize(&msg)?;
     let len = (data.len() as u32).to_be_bytes();
     stream.write_all(&len).await?;
     stream.write_all(data.as_bytes()).await?;
@@ -61,32 +66,11 @@ pub async fn send_message(addr: SocketAddr, msg: Message) -> io::Result<TcpStrea
     Ok(stream)
 }
 
-#[cfg(debug_assertions)]
 pub async fn send_message_socket(socket: &mut TcpStream, msg: Message) -> io::Result<()> {
-    let data = serialize(msg)?;
+    let data = Encode::serialize(&msg)?;
     let len = (data.len() as u32).to_be_bytes();
     socket.write_all(&len).await?;
     socket.write_all(data.as_bytes()).await
-}
-
-#[cfg(not(debug_assertions))]
-pub async fn send_message(addr: SocketAddr, msg: Message) -> io::Result<()> {
-    let mut stream = TcpStream::connect(addr).await?;
-    let data = serialize(msg)?;
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
-
-    Ok(stream)
-}
-
-#[cfg(not(debug_assertions))]
-pub async fn send_message_socket(socket: &mut TcpStream, msg: Message) -> io::Result<()> {
-    println!("sending message to: {socket:?}");
-    let data = serialize(msg)?;
-    let len = (data.len() as u32).to_be_bytes();
-    socket.write_all(&len).await?;
-    socket.write_all(&data).await
 }
 
 pub async fn read_socket(socket: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -118,7 +102,7 @@ pub async fn ping(node: Node, addr: SocketAddr)
             return Err(e);
         }
         let mut peers = state.connected_peers.write()
-            .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+            .expect("connected_peers poisoined (write)");
         peers.retain(|p, _| p.addr != addr);
     }
     Ok(())
@@ -145,27 +129,24 @@ pub async fn challenge(node: Node, socket: &mut TcpStream, new_peer: Peer)
     let state = node.state.clone();
     let connected_peers_size = {
         let connected_peers = state.connected_peers.read()
-            .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+            .expect("connected_peers poisoined (read)");
         connected_peers.len()
     };
     
-
     let is_known_peer = {
         let known_peers = state.known_peers.read()
-            .map_err(|_| io::Error::other("Known peers poisoined"))?;
+            .expect("known_peers poisoined (read)");
         known_peers.contains(&new_peer)
 
     };
     if !is_known_peer {
         let mut known_peers = state.known_peers.write()
-            .map_err(|_| io::Error::other("Known peers poisoined"))?;
+            .expect("known_peers poisoined (write)");
         known_peers.insert(new_peer);
     } else if connected_peers_size >= crate::MAX_PEERS {
         return Ok(());
     }
     
-
-
     if connected_peers_size < crate::MAX_PEERS {
         let nonce = nonce();
         let node_clone = node.clone();
@@ -190,7 +171,6 @@ pub async fn accept(node: Node, nonce: Nonce, addr: SocketAddr)
             && e.kind() != io::ErrorKind::TimedOut {
                 return Err(e);
         }
-        
         Ok(())
     }).await
 }
@@ -200,14 +180,14 @@ pub async fn connect(node: Node, new_peer: Peer, socket: &mut TcpStream, nonce: 
     let state = node.state.clone();
     let connected_peers_size = {
         let connected_peers = state.connected_peers.read()
-            .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+            .expect("connected_peers poisoined (read)");
         connected_peers.len()
     };
 
     if connected_peers_size < crate::MAX_PEERS {
         {
             let mut connected_peers = state.connected_peers.write()
-                .map_err(|_| io::Error::other("Connected peers poisoined"))?;
+                .expect("connected_peers poisoined (write)");
             connected_peers.insert(new_peer, now());
         }
         let mut sk = node.sk.clone();
@@ -217,33 +197,42 @@ pub async fn connect(node: Node, new_peer: Peer, socket: &mut TcpStream, nonce: 
     
     Ok(())
 }
-    
-#[cfg(debug_assertions)]
-pub fn serialize(msg: Message) -> io::Result<String> {
-    {
-        serde_json::to_string(&msg)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+
+pub async fn gossip(node: Node, gossip: Gossip) -> io::Result<()> {
+    let hash = match gossip.clone() {
+        Gossip::PeerGossip(peer_gossip) => peer_gossip.hash,
+    };
+    match node.clone().is_gossip_seen(hash).await {
+        Ok(true) => { return Ok(()) },
+        _ => {}
+    };
+
+    let state = node.state.clone();
+    let peers: Vec<Peer> = {
+        let peers = state.connected_peers.read()
+            .expect("connected_peers poisoined (read)");
+        peers.iter()
+            .map(|(p, _)| p)
+            .cloned()
+            .collect()
+    };
+    for p in peers {
+        let gossip = gossip.clone();
+        let _gossip_task = tokio::spawn(async move {
+            let _ = send_message(p.addr, Message::Gossip(Box::new(gossip))).await;
+        });
     }
+    Ok(())
 }
 
-#[cfg(not(debug_assertions))]
-pub fn serialize(msg: Message) -> io::Result<Vec<u8>> {
-    {
-        bincode::serialize(&msg)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-}
-
-pub fn deserialize(data: Vec<u8>) -> io::Result<Message> {
-    #[cfg(debug_assertions)]
-    {
-        serde_json::from_slice(data.as_slice())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-    
-    #[cfg(not(debug_assertions))]
-    {
-        bincode::deserialize(data.as_slice())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
+pub async fn gossip_peer(node: Node, peer: Peer) -> io::Result<()> {
+    let encoded_peer = Encode::serialize(&peer).expect("Invalid Peer").as_bytes().to_vec();
+    let hashed_payload = blake3::hash(&encoded_peer);
+    let peer_gossip = PeerGossip {
+        sender_id: node.peer.id,
+        encoded_peer: encoded_peer,
+        hash: hashed_payload
+    };
+    gossip(node, Gossip::PeerGossip(Box::new(peer_gossip))).await?;
+    Ok(())
 }
