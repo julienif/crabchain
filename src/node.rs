@@ -183,7 +183,7 @@ impl Node {
         Ok(())
     }
 
-    async fn challenged(self) ->io::Result<()> {
+    async fn challenged(self) -> io::Result<()> {
         tokio::time::sleep(CHALLENGED).await;
         let nonces_and_targets: Vec<(Nonce, SocketAddr)> = {
             let mut recv_nonces = self.recv_nonces.write()
@@ -233,6 +233,7 @@ impl Node {
             let connected_peers = state.connected_peers.read()
                 .expect("connected_peers poisoined (read)");
             if connected_peers.contains_key(peer) {
+                println!("already connected to: {:?}", peer.addr);
                 continue;
             }
             let self_clone = self.clone();
@@ -273,7 +274,6 @@ impl Node {
     }
 
     async fn process(self, msg: Message, socket: &mut TcpStream) -> io::Result<()> {
-        //TODO
         // self is needed when we expect a response
         match msg {
             Message::Ping => {
@@ -351,19 +351,28 @@ impl Node {
 
             Message::Gossip(boxed_gossip) => {
                 println!("gossip");
+                let known_peers: Vec<Peer> = {
+                    let known_peers = self.state.known_peers.read()
+                        .expect("");
+                    known_peers.iter()
+                        .cloned()
+                        .collect()
+                };
+                println!("{:?} {:?}", self.peer.addr, known_peers);
                 match *boxed_gossip.clone() {
                     Gossip::PeerGossip(peer_gossip) => {
                         self.clone().add_gossip(peer_gossip.hash).await?;
                         let peer: Peer = Encode::deserialize(peer_gossip.encoded_peer)?;
-                        //TODO avoid adding ourselves
-                        self.clone().add_known_peer(peer).await?;
+                        if peer.addr != self.peer.addr {
+                            self.clone().add_known_peer(peer).await?;
+                        }
                     }
                 };
                 gossip(self, *boxed_gossip).await
             },
-            Message::NewBlock(block) => Ok(()),
-            Message::GetBlock(block_digest) => Ok(()),
-            Message::GetBlocks(range) => Ok(()),
+            Message::NewBlock(_block) => Ok(()),
+            Message::GetBlock(_block_digest) => Ok(()),
+            Message::GetBlocks(_range) => Ok(()),
         }
     }
 
@@ -383,7 +392,10 @@ impl Node {
             state.known_peers.write()
                 .expect("known_peers poisoined (write)")
         };
-        peers.insert(new_peer);
+        if !peers.contains(&new_peer) {
+            println!("peer known {:?}", new_peer.addr);
+            peers.insert(new_peer);
+        }
         Ok(())
     }
 

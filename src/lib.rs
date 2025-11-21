@@ -21,7 +21,7 @@ pub const CHALLENGED: Duration = Duration::from_secs(5);
 pub const HELLO: Duration = Duration::from_secs(10);
 pub const TS_VALID: u64 = 10; // timestamp ok if 10 secs
 
-pub const MAX_PEERS: usize = 3;
+pub const MAX_PEERS: usize = 2;
 
 const MAX_TXS_PER_BLOCK: usize = 16;
 

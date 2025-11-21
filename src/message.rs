@@ -184,7 +184,7 @@ pub async fn connect(node: Node, new_peer: Peer, socket: &mut TcpStream, nonce: 
         connected_peers.len()
     };
 
-    if connected_peers_size < crate::MAX_PEERS {
+    if connected_peers_size <= crate::MAX_PEERS {
         {
             let mut connected_peers = state.connected_peers.write()
                 .expect("connected_peers poisoined (write)");
