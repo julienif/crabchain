@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::time::Duration;
 use blake3::Hash;
+use rand::SeedableRng;
+use rand::seq::{IteratorRandom, SliceRandom};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{io, time};
 use std::sync::{Arc, RwLock};
@@ -12,11 +14,12 @@ use ed25519_dalek::{PUBLIC_KEY_LENGTH, SigningKey, VerifyingKey};
 
 use crate::crypto::{signing_key, verify_connect_msg};
 use crate::utils::{now, since};
-use crate::{CHALLENGED, DISCONNECTED, HELLO, KEEP_ALIVE, MAX_PEERS, Nonce, NonceType, TS_VALID, message::*};
+use crate::{CHALLENGED, DISCONNECTED, HELLO, KEEP_ALIVE, MAX_PEERS, Nonce, NonceType, ROTATING_PEERS, ROTATION, TS_VALID, message::*};
 use crate::Encode;
 
-//TODO node need to disconnect to inactive peer and randomly
-// connect to new periodically
+//TODO node need to randomly
+// connect to new peer periodically
+// and dont answer pings from unconnected peers
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
@@ -125,6 +128,14 @@ impl Node {
         });
 
         let self_node_clone = self.clone();
+        let _rotation_task = tokio::spawn(async move {
+            loop {
+                let self_node = self_node_clone.clone();
+                let _rotation = self_node.random_rotation().await;
+            }
+        });
+
+        let self_node_clone = self.clone();
         let _wash_task = tokio::spawn(async move {
             loop {
                 let self_node = self_node_clone.clone();
@@ -180,13 +191,12 @@ impl Node {
             let _ping_task = tokio::spawn(async move {
                 let _ = ping(self_clone.clone(), addr).await;
             });
-
-            println!("{:?}", peers.keys());
+            let peers_addr: Vec<_> = peers.clone().keys().map(|p| p.addr).collect();
+            println!("connected to {:?}", peers_addr);
             if since(*peer.1) > DISCONNECTED.as_secs() {
                 let mut peers_updated = state.connected_peers.write()
                     .expect("connected_peers poisoined (write)");
                 peers_updated.remove(peer.0);
-                println!("{:?}", peers_updated.keys());
             }
         }
         Ok(())
@@ -253,8 +263,44 @@ impl Node {
         Ok(())
     }
 
+    async fn random_rotation(self) -> io::Result<()> {
+        tokio::time::sleep(ROTATION).await;
+        let connected_peers: Vec<Peer> = {
+            let connected_peers = self.state.connected_peers.read()
+                .expect("connected_peers poisoned (read)");
+            connected_peers.keys()
+                .cloned()
+                .collect()
+        };
+        
+        if connected_peers.len() >= MAX_PEERS {
+            // this rng needed to be sent accross threads
+            let mut rng = rand::rngs::StdRng::from_entropy();
+            let known_peers: Vec<Peer> = {
+                let known_peers = self.state.known_peers.read()
+                    .expect("known_peers poisoned (read)");
+                known_peers.iter()
+                    .cloned()
+                    .collect()
+            };
+            {
+                let mut remaining_peers = self.state.connected_peers.write()
+                    .expect("connected_peers poisoned (write)");
+                for peer_to_remove in remaining_peers.clone().keys().choose_multiple(&mut rng, ROTATING_PEERS) {
+                    remaining_peers.remove_entry(peer_to_remove);
+                }
+            }
+            
+            for new_peer in known_peers.choose_multiple(&mut rng, ROTATING_PEERS) {
+                let _ = hello(self.clone(), new_peer.addr).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn wash(self) -> io::Result<()> {
-        tokio::time::sleep(10*KEEP_ALIVE).await;
+        tokio::time::sleep(KEEP_ALIVE.saturating_mul(10)).await;
         {
             let nonces = self.nonces.write()
                 .expect("nonces poisoined (write)");
@@ -284,9 +330,18 @@ impl Node {
     async fn process(self, msg: Message, socket: &mut TcpStream) -> io::Result<()> {
         // self is needed when we expect a response
         match msg {
-            Message::Ping => {
+            Message::Ping(peer) => {
                 println!("ping!");
-                pong(self, socket).await
+                let connected_peers = {
+                    let connected_peers = self.state.connected_peers.read()
+                        .expect("connected_peers poisoned (read)");
+                    connected_peers.clone()
+                };
+                if !connected_peers.contains_key(&peer) {
+                    Ok(())
+                } else {
+                    pong(self.clone(), socket).await
+                }
             },
 
             Message::Pong(peer) => {
@@ -362,14 +417,6 @@ impl Node {
 
             Message::Gossip(boxed_gossip) => {
                 println!("gossip");
-                let known_peers: Vec<Peer> = {
-                    let known_peers = self.state.known_peers.read()
-                        .expect("");
-                    known_peers.iter()
-                        .cloned()
-                        .collect()
-                };
-                println!("{:?} {:?}", self.peer.addr, known_peers);
                 match *boxed_gossip.clone() {
                     Gossip::PeerGossip(peer_gossip) => {
                         self.clone().add_gossip(peer_gossip.hash).await?;
@@ -404,7 +451,6 @@ impl Node {
                 .expect("known_peers poisoined (write)")
         };
         if !peers.contains(&new_peer) {
-            println!("peer known {:?}", new_peer.addr);
             peers.insert(new_peer);
         }
         Ok(())

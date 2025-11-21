@@ -18,8 +18,10 @@ use tokio::io;
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
 pub const DISCONNECTED: Duration = KEEP_ALIVE.saturating_mul(2);
-pub const CHALLENGED: Duration = Duration::from_secs(5);
-pub const HELLO: Duration = Duration::from_secs(10);
+pub const CHALLENGED: Duration = Duration::from_secs(2);
+pub const ROTATION: Duration = Duration::from_secs(130); // DON'T let it be multiple of KEEP_ALIVE
+pub const ROTATING_PEERS: usize = 1;
+pub const HELLO: Duration = Duration::from_secs(25);
 pub const TS_VALID: u64 = 10; // timestamp ok if 10 secs
 
 pub const MAX_PEERS: usize = 2;

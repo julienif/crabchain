@@ -42,7 +42,7 @@ pub enum Gossip {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    Ping,
+    Ping(Box<Peer>),
     Pong(Box<Peer>),
     Hello(Box<Peer>),
     Challenge(Box<(Nonce, Peer)>),
@@ -95,7 +95,7 @@ pub async fn expect_answer(node: Node, socket: &mut TcpStream) -> io::Result<()>
 
 pub async fn ping(node: Node, addr: SocketAddr) 
 -> io::Result<()> {
-    let mut socket = send_message(addr, Message::Ping).await?;
+    let mut socket = send_message(addr, Message::Ping(Box::new(node.peer))).await?;
     let state = node.state.clone();
     if let Err(e) = expect_answer(node, &mut socket).await {
         if e.kind() != io::ErrorKind::TimedOut {
