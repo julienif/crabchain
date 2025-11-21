@@ -17,6 +17,7 @@ use tokio::io;
 
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
+pub const DISCONNECTED: Duration = KEEP_ALIVE.saturating_mul(2);
 pub const CHALLENGED: Duration = Duration::from_secs(5);
 pub const HELLO: Duration = Duration::from_secs(10);
 pub const TS_VALID: u64 = 10; // timestamp ok if 10 secs

@@ -43,7 +43,7 @@ pub enum Gossip {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
     Ping,
-    Pong,
+    Pong(Box<Peer>),
     Hello(Box<Peer>),
     Challenge(Box<(Nonce, Peer)>),
     Accept(Box<ConnectMessage>),
@@ -108,10 +108,10 @@ pub async fn ping(node: Node, addr: SocketAddr)
     Ok(())
 }
 
-pub async fn pong(socket: &mut TcpStream) 
+pub async fn pong(node: Node, socket: &mut TcpStream) 
 -> io::Result<()> {
     //tokio::time::sleep(time::Duration::from_secs(6)).await; // use this to handle timeout w/o crash
-    send_message_socket(socket, Message::Pong).await
+    send_message_socket(socket, Message::Pong(Box::new(node.peer))).await
 }
 
 pub async fn hello(node: Node, addr: SocketAddr)

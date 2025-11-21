@@ -12,10 +12,11 @@ use ed25519_dalek::{PUBLIC_KEY_LENGTH, SigningKey, VerifyingKey};
 
 use crate::crypto::{signing_key, verify_connect_msg};
 use crate::utils::{now, since};
-use crate::{CHALLENGED, HELLO, KEEP_ALIVE, MAX_PEERS, Nonce, NonceType, TS_VALID, message::*};
+use crate::{CHALLENGED, DISCONNECTED, HELLO, KEEP_ALIVE, MAX_PEERS, Nonce, NonceType, TS_VALID, message::*};
 use crate::Encode;
 
-//TODO node seems to connect to himself => avoid that
+//TODO node need to disconnect to inactive peer and randomly
+// connect to new periodically
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
@@ -167,18 +168,26 @@ impl Node {
     async fn keep_alive(self) -> io::Result<()> {
         tokio::time::sleep(KEEP_ALIVE).await;
         let state = self.state.clone();
-        let peers: Vec<Peer> = {
+        let peers: HashMap<Peer, u64> = {
             let peers = state.connected_peers.read()
                 .expect("connected_peers poisoined (read)");
-            peers.keys().cloned().collect()
+            peers.clone()
         };
 
         for peer in peers.iter() {
             let self_clone = self.clone();
-            let addr = peer.addr;
+            let addr = peer.0.addr;
             let _ping_task = tokio::spawn(async move {
                 let _ = ping(self_clone.clone(), addr).await;
             });
+
+            println!("{:?}", peers.keys());
+            if since(*peer.1) > DISCONNECTED.as_secs() {
+                let mut peers_updated = state.connected_peers.write()
+                    .expect("connected_peers poisoined (write)");
+                peers_updated.remove(peer.0);
+                println!("{:?}", peers_updated.keys());
+            }
         }
         Ok(())
     }
@@ -233,7 +242,6 @@ impl Node {
             let connected_peers = state.connected_peers.read()
                 .expect("connected_peers poisoined (read)");
             if connected_peers.contains_key(peer) {
-                println!("already connected to: {:?}", peer.addr);
                 continue;
             }
             let self_clone = self.clone();
@@ -278,11 +286,14 @@ impl Node {
         match msg {
             Message::Ping => {
                 println!("ping!");
-                pong(socket).await
+                pong(self, socket).await
             },
 
-            Message::Pong => {
+            Message::Pong(peer) => {
                 println!("pong!");
+                let mut peers = self.state.connected_peers.write()
+                    .expect("connected_peers poisoned (write)");
+                peers.entry(*peer).and_modify(|ts| { *ts = now(); });
                 Ok(())
             },
 
