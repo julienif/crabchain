@@ -25,5 +25,5 @@ Still a *WIP*.
 - Introduce a transaction logic, blocks and consensus protocol (PoW, PoS, etc...).
 
 ## ⚠️ Notes
-This project is purely educational and does not intend to be use anywhere. It might contain several bugs and does not support NAT nor firewalls.  
+This project is purely educational and does not intend to be used anywhere. It might contain several bugs and does not support NAT nor firewalls.  
 You can only run this in a local environment :)
